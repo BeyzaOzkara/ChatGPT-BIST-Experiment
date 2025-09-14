@@ -28,7 +28,9 @@ ChatGPT (or another LLM) then issues **BUY/SELL/HOLD/STOP instructions**, which 
 ├── portfolio.csv       # active positions (auto-created)  
 ├── trades.csv          # trade history (auto-created)  
 ├── equity.csv          # equity history (auto-created)  
+├── cash_log.csv        # records all cash deposits  (auto-created)  
 ├── daily_results/      # daily price snapshots  
+├── demo_data/          # example portfolio, trades & reports (safe to commit)  
 ├── settings.json       # config (cash, stop % etc.)  
 └── orders.txt          # ChatGPT trading plan (input)  
 
@@ -43,17 +45,20 @@ ChatGPT (or another LLM) then issues **BUY/SELL/HOLD/STOP instructions**, which 
 
 2. Install dependencies:
    ```bash
-   pip install pandas numpy yfinance
+   pip install pandas numpy yfinance matplotlib
    ```
 
 3. (Optional) Edit `settings.json` to configure:
    ```json
    {
-     "starting_cash": 1000,
-     "default_trailing_stop_pct": 0.12,
-     "commission_per_trade": 0.0,
-     "slippage_bps": 0,
-     "report_benchmarks": true
+      "starting_cash": 1000,
+      "default_trailing_stop_pct": 0.12,
+      "commission_per_trade": 0.0,
+      "slippage_bps": 0,
+      "report_benchmarks": true,
+      "core_universe": ["AKBNK.IS", "GARAN.IS", "ISCTR.IS"],
+      "satellite_universe": ["KONTR.IS", "PENTA.IS"],
+      "benchmarks": ["XU100.IS", "USDTRY=X"]
    }
    ```
 
@@ -79,7 +84,6 @@ Outputs:
    STOP THYAO.IS 12%
    HARDSTOP ASELS.IS 80.00
    ```
-
 3. Apply:
    ```bash
    python trading_script.py --mode apply --orders orders.txt
@@ -91,18 +95,29 @@ Run without new orders, just trailing stops:
 python trading_script.py --mode stops-only
 ```
 
+### Add New Cash
+Deposit funds into the trading account for increased capital:
+```bash
+python trading_script.py --mode deposit --amount 5000 --note "..."
+```
+
 ---
 
 ## 📊 Data Logging
 - **Trades** → `trades.csv`  
 - **Equity** → `equity.csv` (total, core, satellite, cash)  
 - **Prices** → `daily_results/YYYY-MM-DD_prices.csv`  
+- **Cash Deposits** → `cash_log.csv`
+- **Demo Data** → `demo_data/`  
 
 ---
 
 ## 🔮 Roadmap
 - [ ] Automate ticker universe via `settings.json`  
 - [ ] Add visualization (equity curve, core vs satellite P&L)  
+- [ ] Prompt/response journaling (journal/) for ChatGPT interactions  
+- [ ] Weekly journal summaries  
+- [ ] Weekly research mode (--mode weekly) with sector analysis & top movers
 - [ ] Broker API integration for live execution  
 
 ---

@@ -66,31 +66,25 @@ DEFAULT_SETTINGS = {
     "universe": "bist_curated",
 }
 
-# Core Turkish universe (liquid BIST100 + a few small/speculative names)
-BIST_TICKERS = [
-    # Banks & Finance
-    "AKBNK.IS", "GARAN.IS", "YKBNK.IS", "ISCTR.IS", "HALKB.IS", "VAKBN.IS",
-    # Industrials / Materials / Energy
-    "EREGL.IS", "KRDMD.IS", "TUPRS.IS", "PETKM.IS", "ALARK.IS",
-    # Export & Manufacturing
-    "VESTL.IS", "ARCLK.IS", "SASA.IS", "KORDS.IS",
-    # Defense & Tech
-    "ASELS.IS", "OTKAR.IS", "KAREL.IS",
-    # Consumer & Services
-    "BIMAS.IS", "MGROS.IS", "TAVHL.IS", "THYAO.IS",
 
-    "PGSUS.IS", "IZMDC.IS"   # NEW core tickers
-]
+# ------------------------------- Settings --------------------------------
 
-# Satellite small caps (speculative "moonshot" bucket; use tiny sizing)
-BIST_SATELLITE = ["KONTR.IS", "GESAN.IS", "PENTA.IS", "QUAGR.IS", "KLSER.IS",
-                  "BFREN.IS", "KRTEK.IS", "TRHOL.IS", "BARMA.IS", "BLCYT.IS",
-                    "EFORC.IS", "TGSAS.IS", "PKENT.IS", "YYAPI.IS", "OBAMS.IS",
-                    "PCILT.IS", "DSTKF.IS"   # NEW satellite tickers
-                  ]
+def load_settings() -> dict:
+    if SETTINGS_JSON.exists():
+        try:
+            with open(SETTINGS_JSON, "r", encoding="utf-8") as f:
+                s = json.load(f)
+                settings = {**DEFAULT_SETTINGS, **s}
+                return settings
+        except Exception as e:
+            logging.warning(f"Failed reading settings.json; using defaults. {e}")
+    return DEFAULT_SETTINGS.copy()
 
-# Benchmarks
-BENCHMARKS = ["XU100.IS", "USDTRY=X"]
+
+settings = load_settings()
+BIST_TICKERS = settings.get("core_universe", [])
+BIST_SATELLITE = settings.get("satellite_universe", [])
+BENCHMARKS = settings.get("benchmarks", ["XU100.IS", "USDTRY=X"])
 
 
 def classify_universe(ticker: str) -> str:
@@ -126,19 +120,6 @@ class Trade:
     slippage_bps: int
     reason: str = ""    # free text (e.g., "stop-loss", "chatgpt plan", etc.)
     universe: str = ""  # "CORE", "SATELLITE", or "BENCHMARK"
-
-# ------------------------------- Settings --------------------------------
-
-def load_settings() -> dict:
-    if SETTINGS_JSON.exists():
-        try:
-            with open(SETTINGS_JSON, "r", encoding="utf-8") as f:
-                s = json.load(f)
-                return {**DEFAULT_SETTINGS, **s}
-        except Exception as e:
-            logging.warning(f"Failed reading settings.json; using defaults. {e}")
-    return DEFAULT_SETTINGS.copy()
-
 
 # ---------------------------- Utility / Dates ----------------------------
 
@@ -353,10 +334,33 @@ def print_daily_report(asof: pd.Timestamp, prices: pd.DataFrame, portfolio_value
 
     print("\n[ Portfolio Snapshot ]")
     print(portfolio_value_block)
+    print(f"\nAvailable cash: {load_cash(load_settings()):.2f} TRY")
 
     print("\n[ Request ]")
-    print("Please give me buy/sell/hold recommendations based on this report.")
+    print("Please give me trading instructions in the following format:")
+    print(" - BUY <TICKER> <QTY> @ MKT  (rounded down whole shares based on available cash)")
+    print(" - SELL <TICKER> <QTY|ALL> @ MKT")
+    print(" - HOLD <TICKER>")
+    print(" - STOP <TICKER> <PERCENT%>  (for trailing stop)")
+    print(" - HARDSTOP <TICKER> <PRICE> (absolute stop floor)")
 
+    print("\nImportant rules already handled by the system:")
+    print(" - Core tickers (banks/blue chips) default trailing stop = 10%")
+    print(" - Satellite tickers (speculative) default trailing stop = 18%")
+    print(" - Profit-taking: when a stock gains +20%, system auto-sells HALF and moves stop to breakeven")
+    print("   → You do not need to issue manual SELL for this, unless you want to fully exit")
+
+    # If portfolio is empty, give allocation guidance
+    if portfolio_value_block.strip().startswith("Empty DataFrame"):
+        print("\nMy portfolio is currently empty.")
+        print("Please suggest a new allocation with:")
+        print(" - 60% of cash into core tickers")
+        print(" - 40% of cash into satellite tickers")
+        print("Distribute allocations evenly inside each group.")
+
+    
+    print("\nImportant: If you suggest multiple BUY orders, divide the total available cash "
+      "across them. The sum of all purchases must not exceed the available cash shown above.")
 # --------------------------- Equity & Benchmarks --------------------------
 
 def compute_equity_block(
@@ -379,7 +383,7 @@ def compute_equity_block(
         if h.empty:
             px = np.nan
         elif "close" in h.columns:
-            px = float(h["close"].iloc[-1])
+            px = float(h["close"].iloc[-1].item())
         elif "adj_close" in h.columns:
             px = float(h["adj_close"].iloc[-1])
         else:
@@ -398,7 +402,12 @@ def compute_equity_block(
 
     df = pd.DataFrame(rows, columns=["ticker", "shares", "stop_loss", "buy_price", "position_value"])
     df["cost_basis"] = df["shares"] * df["buy_price"]
-    printable = df[["ticker", "shares", "stop_loss", "buy_price", "cost_basis"]].to_string(index=False)
+    # Add trailing stop % from actual positions
+    df["trailing_stop%"] = [
+        f"{positions[t].trailing_stop_pct*100:.1f}%" if t in positions else "—"
+        for t in df["ticker"]
+    ]
+    printable = df[["ticker", "shares", "stop_loss", "trailing_stop%", "buy_price", "cost_basis"]].to_string(index=False)
 
     total_equity = cash + total_pos_val
     equity_row = {
@@ -451,7 +460,13 @@ def apply_trailing_stops(
     commission_per_trade: float,
     slippage_bps: int,
 ) -> Tuple[Dict[str, Position], List[Trade], float]:
-    """Update peaks; auto-sell if violated. Returns (updated_positions, trades, realized_pnl_delta)"""
+    """
+    Update peaks, handle trailing stops and profit-taking.
+    - Core tickers: tighter stops (default 10%)
+    - Satellite tickers: wider stops (default 18%)
+    - Profit-taking: at +20% -> sell half, move stop to break-even
+    Returns (updated_positions, trades, realized_pnl_delta)
+    """
     trades: List[Trade] = []
     pnl_delta = 0.0
     updated = positions.copy()
@@ -461,10 +476,50 @@ def apply_trailing_stops(
         if h.empty or "close" not in h:
             logging.warning(f"No price for {t}; skipping stop eval.")
             continue
-        last_close = float(h["close"].iloc[-1])
+        last_close = float(h["close"].iloc[-1].item())
+
+        # --- Adjust trailing stop rules by universe ---
+        if p.trailing_stop_pct == 0:  # if not explicitly set yet
+            if t in BIST_TICKERS:       # core
+                p.trailing_stop_pct = 0.10
+            elif t in BIST_SATELLITE:   # satellite
+                p.trailing_stop_pct = 0.18
+            else:                       # fallback
+                p.trailing_stop_pct = 0.12
 
         # Update peak
         p.peak_price = float(max(p.peak_price, last_close)) if p.peak_price > 0 else last_close
+        
+        # --- Profit-taking rule (scale out at +20%) ---
+        profit_target = p.buy_price * 1.20
+        if last_close >= profit_target and "scaled" not in p.notes.lower() and p.shares > 1:
+            qty_to_sell = p.shares / 2
+            slip_mult = 1.0 - (slippage_bps / 10000.0)
+            exec_px = last_close * slip_mult
+            proceeds = exec_px * qty_to_sell - commission_per_trade
+            cost = p.buy_price * qty_to_sell
+            pnl = proceeds - cost
+            pnl_delta += pnl
+
+            trades.append(
+                Trade(
+                    date=asof.strftime("%Y-%m-%d"),
+                    ticker=t,
+                    side="AUTO_SELL_PROFIT",
+                    qty=float(qty_to_sell),
+                    price=round(exec_px, 4),
+                    commission=commission_per_trade,
+                    slippage_bps=slippage_bps,
+                    reason=f"Profit target hit (+20%). Sold half, stop to breakeven.",
+                )
+            )
+
+            # Reduce shares
+            p.shares -= qty_to_sell
+            # Move stop-loss to breakeven (buy price)
+            p.stop_loss = p.buy_price
+            # Mark as scaled
+            p.notes = (p.notes + " scaled").strip()
 
         # Compute effective trailing stop
         trailing_floor = p.peak_price * (1.0 - p.trailing_stop_pct)
@@ -543,7 +598,7 @@ def apply_orders(
         h = md.history(t, period="6d", interval="1d")
         if h.empty or "close" not in h:
             raise ValueError(f"No price for {t}")
-        return float(h["close"].iloc[-1])
+        return float(h["close"].iloc[-1].item())
 
     for cmd, toks in parsed:
         if cmd == "HOLD":
@@ -669,10 +724,12 @@ def append_trades(trades: List[Trade]) -> None:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="BIST Trading Script (ChatGPT Micro-Cap Experiment — TR)")
-    parser.add_argument("--mode", choices=["report", "apply", "stops-only"], default="report",
-                        help="report: print daily report; apply: apply orders from --orders; stops-only: only evaluate stops")
+    parser.add_argument("--mode", choices=["report", "apply", "stops-only", "deposit"], default="report",
+                        help="report: print daily report; apply: apply orders from --orders; stops-only: only evaluate stops; deposit: add new cash")
     parser.add_argument("--orders", type=str, help="Path to a text file with orders (BUY/SELL/HOLD/STOP/HARDSTOP)")
     parser.add_argument("--asof", type=str, help="YYYY-MM-DD override date")
+    parser.add_argument("--amount", type=float, help="Amount of cash to deposit (TRY)")
+    parser.add_argument("--note", type=str, help="Optional note for deposit (e.g., salary top-up)")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -726,8 +783,42 @@ def main(argv: Optional[List[str]] = None) -> int:
             append_trades(plan_trades)
         save_portfolio(positions)
         save_cash(cash)
+        # Auto-clear orders.txt after successful apply
+        try:
+            Path(args.orders).write_text("", encoding="utf-8")
+            logging.info(f"Orders file '{args.orders}' has been cleared after apply.")
+        except Exception as e:
+            logging.warning(f"Could not clear orders file: {e}")
 
-    # 3) Always produce a fresh report snapshot for ChatGPT
+    # 3) Handle cash deposits
+    if args.mode == "deposit":
+        if not args.amount or args.amount <= 0:
+            logging.error("Deposit requires a positive --amount")
+            return 2
+
+        deposit_amount = float(args.amount)
+        cash += deposit_amount
+        save_cash(cash)
+
+        # Log deposit event
+        deposit_log = Path("cash_log.csv")
+        row = {
+            "date": today_local().strftime("%Y-%m-%d"),
+            "amount": round(deposit_amount, 2),
+            "new_balance": round(cash, 2),
+            "note": args.note if args.note else "",
+        }
+        if deposit_log.exists():
+            df = pd.read_csv(deposit_log)
+            df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        else:
+            df = pd.DataFrame([row])
+        df.to_csv(deposit_log, index=False)
+
+        logging.info(f"Deposited {deposit_amount:.2f} TRY. New cash balance: {cash:.2f} TRY")
+        return 0
+    
+    # 4) Always produce a fresh report snapshot for ChatGPT
     tickers_for_report = sorted(set(BIST_TICKERS + BIST_SATELLITE + (BENCHMARKS if settings["report_benchmarks"] else [])))
     prices = snapshot_prices(md, tickers_for_report, asof)
     port_block, total_equity = compute_equity_block(md, positions, cash, asof, settings["report_benchmarks"])
