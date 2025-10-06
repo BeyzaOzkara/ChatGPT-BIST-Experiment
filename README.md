@@ -23,6 +23,7 @@ ChatGPT (or another LLM) then issues **BUY/SELL/HOLD/STOP instructions**, which 
 ---
 
 ## 📂 Repo Structure
+```bash
 .
 ├── trading_script.py   # main trading engine  
 ├── portfolio.csv       # active positions (auto-created)  
@@ -33,7 +34,7 @@ ChatGPT (or another LLM) then issues **BUY/SELL/HOLD/STOP instructions**, which 
 ├── demo_data/          # example portfolio, trades & reports (safe to commit)  
 ├── settings.json       # config (cash, stop % etc.)  
 └── orders.txt          # ChatGPT trading plan (input)  
-
+```
 ---
 
 ## ⚙️ Installation
